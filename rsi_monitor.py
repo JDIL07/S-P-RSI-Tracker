@@ -133,12 +133,21 @@ def send_notification(title: str, message: str, priority: str = "default") -> bo
     """
     Send a push notification via ntfy.sh. Returns True only on confirmed success.
 
-    NOTE: priority defaults to "default", NOT "high"/"urgent". ntfy maps elevated
-    priorities to Apple's time-sensitive/critical interruption levels on iOS,
-    which require special entitlements the app doesn't have - so iOS silently
-    suppresses the banner/sound instead of showing it, even though the message
-    still shows up in-app. Default priority delivers a normal, reliable banner
-    on both iOS and Android.
+    NOTES:
+    - priority defaults to "default", NOT "high"/"urgent". ntfy maps elevated
+      priorities to Apple's time-sensitive/critical interruption levels on
+      iOS, which require special entitlements the app doesn't have - so iOS
+      silently suppresses the banner/sound instead of showing it, even
+      though the message still shows up in-app. Default priority delivers a
+      normal, reliable banner on both iOS and Android.
+    - title/message must be ASCII-safe (or at least Latin-1 encodable).
+      HTTP headers are encoded as Latin-1 by the requests library, so any
+      emoji or non-Latin-1 Unicode character in the title will raise a
+      UnicodeEncodeError and silently prevent the notification from being
+      sent at all. Keep titles to plain ASCII text; put anything fancy in
+      the message body instead if truly needed (ntfy encodes the body as
+      UTF-8, not Latin-1, so the body is more permissive - but to keep
+      things simple and reliable, this script avoids emoji entirely).
     """
     if not NTFY_TOPIC:
         log.error("NTFY_TOPIC is not set - cannot send notification.")
@@ -246,7 +255,9 @@ def send_digest_notification(new_oversold: list[dict]):
     lines = [f"{d['ticker']}: RSI {d['rsi']:.1f} (${d['price']:.2f})" for d in new_oversold_sorted]
 
     count = len(lines)
-    title = f"\U0001F4C9 {count} S&P 500 Stock{'s' if count != 1 else ''} Oversold (RSI < {int(RSI_THRESHOLD)})"
+    # NOTE: title is plain ASCII on purpose - see send_notification() docstring
+    # for why emoji/non-Latin-1 characters here will silently break the push.
+    title = f"{count} S&P 500 Stock{'s' if count != 1 else ''} Oversold (RSI < {int(RSI_THRESHOLD)})"
 
     # Truncate the body if there's an unusually large number of names, so the
     # push notification stays readable - the full list is always in the logs.
