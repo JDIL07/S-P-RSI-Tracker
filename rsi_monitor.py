@@ -130,7 +130,16 @@ def compute_rsi(closes: pd.Series, period: int = RSI_PERIOD) -> float:
 
 
 def send_notification(title: str, message: str, priority: str = "default") -> bool:
-    """Send a push notification via ntfy.sh. Returns True only on confirmed success."""
+    """
+    Send a push notification via ntfy.sh. Returns True only on confirmed success.
+
+    NOTE: priority defaults to "default", NOT "high"/"urgent". ntfy maps elevated
+    priorities to Apple's time-sensitive/critical interruption levels on iOS,
+    which require special entitlements the app doesn't have - so iOS silently
+    suppresses the banner/sound instead of showing it, even though the message
+    still shows up in-app. Default priority delivers a normal, reliable banner
+    on both iOS and Android.
+    """
     if not NTFY_TOPIC:
         log.error("NTFY_TOPIC is not set - cannot send notification.")
         return False
