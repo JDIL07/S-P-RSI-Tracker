@@ -129,7 +129,7 @@ def compute_rsi(closes: pd.Series, period: int = RSI_PERIOD) -> float:
     return float(rsi.iloc[-1])
 
 
-def send_notification(title: str, message: str, priority: str = "high") -> bool:
+def send_notification(title: str, message: str, priority: str = "default") -> bool:
     """Send a push notification via ntfy.sh. Returns True only on confirmed success."""
     if not NTFY_TOPIC:
         log.error("NTFY_TOPIC is not set - cannot send notification.")
