@@ -11,8 +11,10 @@ Each run:
   3. Loads persisted alert state from rsi_state.json (committed to the repo
      by the workflow after every run, so state survives between runs).
   4. Computes Wilder's RSI(14) for every ticker on 15-minute bars.
-  5. Sends a push notification via ntfy.sh for any ticker whose RSI just
-     crossed below the threshold (and hasn't already been alerted).
+  5. Sends ONE combined push notification (via ntfy.sh) listing every ticker
+     whose RSI just crossed below the threshold this run (batched to avoid
+     ntfy's burst rate limit, and so your phone gets one useful digest
+     instead of a flood of separate pushes).
   6. Saves updated state back to rsi_state.json for the workflow to commit.
 
 Author: Built for Jack Dilauro
@@ -43,6 +45,7 @@ STATE_FILE = "rsi_state.json"
 TICKERS_FILE = "sp500_tickers.json"
 TICKERS_REFRESH_HOURS = 24     # re-scrape Wikipedia at most once a day
 ONLY_DURING_MARKET_HOURS = True
+MAX_TICKERS_PER_NOTIFICATION = 25  # ntfy message body limit is generous, but keep it readable
 
 # Wikipedia (and many sites) reject requests without a browser-like
 # User-Agent header, returning HTTP 403 Forbidden. This header makes our
@@ -56,8 +59,6 @@ HTTP_HEADERS = {
 
 # Fallback list used only if the live Wikipedia scrape fails AND no local
 # cache exists yet (e.g. very first run happens to hit a transient block).
-# This is intentionally small - it just keeps the monitor from dying
-# completely; the next successful scrape will replace it with the full list.
 FALLBACK_TICKERS = [
     "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "NVDA", "TSLA",
     "BRK-B", "JPM", "V", "UNH", "HD", "PG", "MA", "XOM", "JNJ", "MRK",
@@ -88,7 +89,7 @@ def get_sp500_tickers() -> list[str]:
         with open(TICKERS_FILE) as f:
             cached = json.load(f)
         cached_time = datetime.fromisoformat(cached["updated"])
-        if datetime.utcnow() - cached_time < timedelta(hours=TICKERS_REFRESH_HOURS):
+        if datetime.now(ZoneInfo("UTC")).replace(tzinfo=None) - cached_time < timedelta(hours=TICKERS_REFRESH_HOURS):
             log.info(f"Using cached ticker list ({len(cached['tickers'])} tickers).")
             return cached["tickers"]
 
@@ -99,7 +100,7 @@ def get_sp500_tickers() -> list[str]:
         table = pd.read_html(StringIO(resp.text))[0]
         tickers = table["Symbol"].str.replace(".", "-", regex=False).tolist()
         with open(TICKERS_FILE, "w") as f:
-            json.dump({"updated": datetime.utcnow().isoformat(), "tickers": tickers}, f, indent=2)
+            json.dump({"updated": datetime.now(ZoneInfo("UTC")).replace(tzinfo=None).isoformat(), "tickers": tickers}, f, indent=2)
         log.info(f"Refreshed ticker list from Wikipedia: {len(tickers)} tickers.")
         return tickers
     except Exception as e:
@@ -128,20 +129,33 @@ def compute_rsi(closes: pd.Series, period: int = RSI_PERIOD) -> float:
     return float(rsi.iloc[-1])
 
 
-def send_notification(title: str, message: str, priority: str = "high"):
+def send_notification(title: str, message: str, priority: str = "high") -> bool:
+    """Send a push notification via ntfy.sh. Returns True only on confirmed success."""
     if not NTFY_TOPIC:
         log.error("NTFY_TOPIC is not set - cannot send notification.")
-        return
+        return False
     try:
-        requests.post(
+        resp = requests.post(
             f"https://ntfy.sh/{NTFY_TOPIC}",
             data=message.encode("utf-8"),
             headers={"Title": title, "Priority": priority, "Tags": "chart_with_downwards_trend,warning"},
             timeout=10,
         )
-        log.info(f"Notification sent: {title} | {message}")
+        if resp.status_code == 200:
+            log.info(f"Notification sent successfully: {title}")
+            return True
+        elif resp.status_code == 429:
+            log.error(
+                f"Notification REJECTED by ntfy.sh - rate limited (HTTP 429). "
+                f"Body: {resp.text[:200]}"
+            )
+            return False
+        else:
+            log.error(f"Notification FAILED - HTTP {resp.status_code}: {resp.text[:200]}")
+            return False
     except Exception as e:
-        log.error(f"Failed to send notification: {e}")
+        log.error(f"Failed to send notification (exception): {e}")
+        return False
 
 
 def load_state() -> dict:
@@ -182,8 +196,11 @@ def fetch_batch_closes(tickers: list[str]) -> dict:
     return result
 
 
-def run_one_scan(tickers: list[str], state: dict) -> list[str]:
-    alerts_this_scan = []
+def run_one_scan(tickers: list[str], state: dict) -> list[dict]:
+    """Returns a list of dicts: {ticker, rsi, price} for every NEW oversold signal this run."""
+    new_oversold = []
+    now_iso = datetime.now(ZoneInfo("UTC")).replace(tzinfo=None).isoformat()
+
     for i in range(0, len(tickers), CHUNK_SIZE):
         chunk = tickers[i : i + CHUNK_SIZE]
         closes_map = fetch_batch_closes(chunk)
@@ -195,22 +212,46 @@ def run_one_scan(tickers: list[str], state: dict) -> list[str]:
             already_alerted = state.get(ticker, {}).get("alerted", False)
 
             if rsi < RSI_THRESHOLD and not already_alerted:
-                last_price = closes.iloc[-1]
-                title = f"RSI Oversold: {ticker}"
-                message = f"{ticker} RSI({RSI_PERIOD}) = {rsi:.1f} | Last price: ${last_price:.2f}"
-                send_notification(title, message)
-                alerts_this_scan.append(ticker)
-                state[ticker] = {"alerted": True, "rsi": rsi, "time": datetime.utcnow().isoformat()}
+                last_price = float(closes.iloc[-1])
+                new_oversold.append({"ticker": ticker, "rsi": rsi, "price": last_price})
+                state[ticker] = {"alerted": True, "rsi": rsi, "time": now_iso}
 
             elif rsi >= RSI_THRESHOLD + RESET_BUFFER and already_alerted:
-                state[ticker] = {"alerted": False, "rsi": rsi, "time": datetime.utcnow().isoformat()}
+                state[ticker] = {"alerted": False, "rsi": rsi, "time": now_iso}
 
             else:
                 state.setdefault(ticker, {})
                 state[ticker]["rsi"] = rsi
-                state[ticker]["time"] = datetime.utcnow().isoformat()
+                state[ticker]["time"] = now_iso
 
-    return alerts_this_scan
+    return new_oversold
+
+
+def send_digest_notification(new_oversold: list[dict]):
+    """Send ONE combined notification listing all newly oversold tickers this run."""
+    if not new_oversold:
+        return
+
+    # Sort by RSI ascending so the most oversold names appear first.
+    new_oversold_sorted = sorted(new_oversold, key=lambda x: x["rsi"])
+    lines = [f"{d['ticker']}: RSI {d['rsi']:.1f} (${d['price']:.2f})" for d in new_oversold_sorted]
+
+    count = len(lines)
+    title = f"\U0001F4C9 {count} S&P 500 Stock{'s' if count != 1 else ''} Oversold (RSI < {int(RSI_THRESHOLD)})"
+
+    # Truncate the body if there's an unusually large number of names, so the
+    # push notification stays readable - the full list is always in the logs.
+    shown = lines[:MAX_TICKERS_PER_NOTIFICATION]
+    body = "\n".join(shown)
+    if count > MAX_TICKERS_PER_NOTIFICATION:
+        body += f"\n...and {count - MAX_TICKERS_PER_NOTIFICATION} more (see workflow log for full list)"
+
+    success = send_notification(title, body)
+    if not success:
+        log.error(
+            "Digest notification failed to send. Full list of new oversold tickers this run "
+            f"(for your reference, since the push failed): {[d['ticker'] for d in new_oversold_sorted]}"
+        )
 
 
 def main():
@@ -223,11 +264,12 @@ def main():
     state = load_state()
 
     log.info(f"Scanning {len(tickers)} tickers...")
-    alerts = run_one_scan(tickers, state)
+    new_oversold = run_one_scan(tickers, state)
     save_state(state)
 
-    if alerts:
-        log.info(f"Alerts fired this run: {alerts}")
+    if new_oversold:
+        log.info(f"New oversold tickers this run: {[d['ticker'] for d in new_oversold]}")
+        send_digest_notification(new_oversold)
     else:
         log.info("No new oversold signals this run.")
 
