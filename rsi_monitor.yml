@@ -1,0 +1,47 @@
+name: S&P 500 RSI Monitor
+
+on:
+  schedule:
+    # Runs every 15 minutes, 13:00-21:45 UTC, Mon-Fri.
+    # This window covers 9:30am-4:00pm ET regardless of daylight saving
+    # (EST = UTC-5, EDT = UTC-4). The script itself double-checks real
+    # market hours (America/New_York) and exits instantly if the market
+    # is actually closed, so off-hours runs cost almost nothing.
+    - cron: "*/15 13-21 * * 1-5"
+  workflow_dispatch: {}   # lets you manually trigger a run from the Actions tab
+
+permissions:
+  contents: write   # needed so the workflow can commit the updated state file back
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run RSI scan
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python rsi_monitor.py
+
+      - name: Commit updated state (if changed)
+        run: |
+          git config user.name "rsi-monitor-bot"
+          git config user.email "actions@github.com"
+          git add rsi_state.json sp500_tickers.json 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Update RSI state [skip ci]"
+            git push
+          else
+            echo "No state changes to commit."
+          fi
