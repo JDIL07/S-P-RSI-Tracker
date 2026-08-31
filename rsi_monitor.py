@@ -1,5 +1,5 @@
 """
-S&P 500 RSI Monitor — GitHub Actions edition
+S&P 500 RSI Monitor â€” GitHub Actions edition
 ----------------------------------------------
 Designed to run as a single "one scan and exit" invocation, triggered on a
 schedule by a GitHub Actions workflow (see .github/workflows/rsi_monitor.yml).
@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import logging
+from io import StringIO
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -42,6 +43,25 @@ STATE_FILE = "rsi_state.json"
 TICKERS_FILE = "sp500_tickers.json"
 TICKERS_REFRESH_HOURS = 24     # re-scrape Wikipedia at most once a day
 ONLY_DURING_MARKET_HOURS = True
+
+# Wikipedia (and many sites) reject requests without a browser-like
+# User-Agent header, returning HTTP 403 Forbidden. This header makes our
+# request look like it's coming from a normal Chrome browser.
+HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+}
+
+# Fallback list used only if the live Wikipedia scrape fails AND no local
+# cache exists yet (e.g. very first run happens to hit a transient block).
+# This is intentionally small - it just keeps the monitor from dying
+# completely; the next successful scrape will replace it with the full list.
+FALLBACK_TICKERS = [
+    "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "NVDA", "TSLA",
+    "BRK-B", "JPM", "V", "UNH", "HD", "PG", "MA", "XOM", "JNJ", "MRK",
+]
 # ======================================================================
 
 logging.basicConfig(
@@ -73,12 +93,24 @@ def get_sp500_tickers() -> list[str]:
             return cached["tickers"]
 
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    table = pd.read_html(url)[0]
-    tickers = table["Symbol"].str.replace(".", "-", regex=False).tolist()
-    with open(TICKERS_FILE, "w") as f:
-        json.dump({"updated": datetime.utcnow().isoformat(), "tickers": tickers}, f, indent=2)
-    log.info(f"Refreshed ticker list from Wikipedia: {len(tickers)} tickers.")
-    return tickers
+    try:
+        resp = requests.get(url, headers=HTTP_HEADERS, timeout=15)
+        resp.raise_for_status()
+        table = pd.read_html(StringIO(resp.text))[0]
+        tickers = table["Symbol"].str.replace(".", "-", regex=False).tolist()
+        with open(TICKERS_FILE, "w") as f:
+            json.dump({"updated": datetime.utcnow().isoformat(), "tickers": tickers}, f, indent=2)
+        log.info(f"Refreshed ticker list from Wikipedia: {len(tickers)} tickers.")
+        return tickers
+    except Exception as e:
+        log.error(f"Failed to refresh ticker list from Wikipedia: {e}")
+        if os.path.exists(TICKERS_FILE):
+            with open(TICKERS_FILE) as f:
+                cached = json.load(f)
+            log.warning(f"Falling back to stale cached ticker list ({len(cached['tickers'])} tickers).")
+            return cached["tickers"]
+        log.warning(f"No cache available - using small built-in fallback list ({len(FALLBACK_TICKERS)} tickers).")
+        return FALLBACK_TICKERS
 
 
 def compute_rsi(closes: pd.Series, period: int = RSI_PERIOD) -> float:
