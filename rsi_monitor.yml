@@ -34,14 +34,16 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python rsi_monitor.py
 
-      - name: Commit updated state (if changed)
+      - name: Commit updated files (if changed)
         run: |
           git config user.name "rsi-monitor-bot"
           git config user.email "actions@github.com"
-          git add rsi_state.json sp500_tickers.json 2>/dev/null || true
+
+          git add GitHubTest.csv rsi_state.json sp500_tickers.json
+
           if ! git diff --cached --quiet; then
-            git commit -m "Update RSI state [skip ci]"
+            git commit -m "Update RSI files [skip ci]"
             git push
           else
-            echo "No state changes to commit."
+            echo "No file changes to commit."
           fi
