@@ -43,19 +43,17 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python rsi_monitor.py
 
-      - name: Commit updated state (if changed)
-        run: |
-          git config user.name "rsi-monitor-bot"
-          git config user.email "actions@github.com"
-          git add rsi_state.json sp500_tickers.json 2>/dev/null || true
-          if ! git diff --cached --quiet; then
-            git commit -m "Update RSI state [skip ci]"
-            # Pull any commits that landed on the remote since this run
-            # started (e.g. from an overlapping run), rebasing our state
-            # commit on top, then push. This avoids the "fetch first"
-            # rejection even in the rare case two runs still overlap.
-            git pull --rebase origin main
-            git push
-          else
-            echo "No state changes to commit."
-          fi
+      - name: Commit updated files (if changed)
+  run: |
+    git config user.name "rsi-monitor-bot"
+    git config user.email "actions@github.com"
+
+    git add GitHubTest.csv rsi_state.json sp500_tickers.json 2>/dev/null || true
+
+    if ! git diff --cached --quiet; then
+      git commit -m "Update RSI files [skip ci]"
+      git pull --rebase origin main
+      git push
+    else
+      echo "No file changes to commit."
+    fi
