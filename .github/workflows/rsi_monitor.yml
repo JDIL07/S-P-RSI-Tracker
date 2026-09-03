@@ -2,22 +2,12 @@ name: S&P 500 RSI Monitor
 
 on:
   schedule:
-    # Runs every 15 minutes, 13:00-21:45 UTC, Mon-Fri.
-    # This window covers 9:30am-4:00pm ET regardless of daylight saving
-    # (EST = UTC-5, EDT = UTC-4). The script itself double-checks real
-    # market hours (America/New_York) and exits instantly if the market
-    # is actually closed, so off-hours runs cost almost nothing.
     - cron: "*/15 13-21 * * 1-5"
-  workflow_dispatch: {}   # lets you manually trigger a run from the Actions tab
+  workflow_dispatch:
 
 permissions:
-  contents: write   # needed so the workflow can commit the updated state file back
+  contents: write
 
-# Ensures only ONE run of this workflow executes at a time. If a scheduled
-# run fires while a previous run (e.g. a manual test) is still in progress,
-# the new run will wait in line instead of running concurrently - this is
-# what prevents the "fetch first" git push race condition where two runs
-# both try to commit rsi_state.json at the same time.
 concurrency:
   group: rsi-monitor
   cancel-in-progress: false
@@ -26,6 +16,7 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -43,17 +34,17 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python rsi_monitor.py
 
-      - name: Commit updated files (if changed)
-  run: |
-    git config user.name "rsi-monitor-bot"
-    git config user.email "actions@github.com"
+      - name: Commit updated files
+        run: |
+          git config user.name "rsi-monitor-bot"
+          git config user.email "actions@github.com"
 
-    git add GitHubTest.csv rsi_state.json sp500_tickers.json 2>/dev/null || true
+          git add GitHubTest.csv rsi_state.json sp500_tickers.json
 
-    if ! git diff --cached --quiet; then
-      git commit -m "Update RSI files [skip ci]"
-      git pull --rebase origin main
-      git push
-    else
-      echo "No file changes to commit."
-    fi
+          if ! git diff --cached --quiet; then
+            git commit -m "Update RSI files [skip ci]"
+            git pull --rebase origin main
+            git push
+          else
+            echo "No file changes to commit."
+          fi
